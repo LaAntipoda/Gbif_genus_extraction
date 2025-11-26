@@ -1,0 +1,167 @@
+#!/bin/bash
+
+# Script para agrupar muestras por ECO_NAME (optimizado para archivos grandes)
+# Uso: ./group_samples.sh
+
+OTU_FILE="Otu_table_updated.csv"
+META_FILE="meta_metadata_2.csv"
+OUTPUT_OTU="Otu_table_grouped.csv"
+OUTPUT_META="meta_metadata_grouped.csv"
+
+echo "Iniciando agrupación de muestras por ECO_NAME..."
+
+# Verificar que los archivos existen
+if [ ! -f "$OTU_FILE" ]; then
+    echo "Error: No se encuentra $OTU_FILE"
+    exit 1
+fi
+
+if [ ! -f "$META_FILE" ]; then
+    echo "Error: No se encuentra $META_FILE"
+    exit 1
+fi
+
+# Crear script de Python temporal para el agrupamiento
+cat > group_samples.py << 'EOF'
+import pandas as pd
+import sys
+import gc
+
+def group_samples(otu_file, meta_file, output_otu, output_meta):
+    print(f"Leyendo {meta_file}...")
+    metadata = pd.read_csv(meta_file, sep=',')
+    
+    # Verificar que existen las columnas necesarias
+    if 'Plot' not in metadata.columns:
+        print("Error: No se encuentra la columna 'Plot' en metadata")
+        sys.exit(1)
+    
+    if 'ECO_NAME' not in metadata.columns:
+        print("Error: No se encuentra la columna 'ECO_NAME' en metadata")
+        sys.exit(1)
+    
+    # Crear diccionario Plot -> ECO_NAME
+    plot_to_eco = dict(zip(metadata['Plot'].astype(str), metadata['ECO_NAME'].astype(str)))
+    
+    # Obtener ECO_NAMEs únicos
+    unique_ecos = sorted(set(plot_to_eco.values()))
+    print(f"ECO_NAMEs únicos encontrados: {len(unique_ecos)}")
+    
+    # Leer solo el header del archivo OTU
+    print(f"Leyendo header de {otu_file}...")
+    with open(otu_file, 'r') as f:
+        header_line = f.readline().strip()
+    
+    # Separar columnas del header
+    all_columns = header_line.split('\t')
+    otu_id_col = all_columns[0]  # Primera columna (IDs de OTUs)
+    sample_cols = all_columns[1:]  # Resto son muestras
+    
+    print(f"Total de muestras en OTU table: {len(sample_cols)}")
+    
+    # Crear mapeo de índice de columna a ECO_NAME
+    col_to_eco = {}
+    valid_col_indices = []
+    
+    for idx, col in enumerate(sample_cols):
+        if col in plot_to_eco:
+            eco_name = plot_to_eco[col]
+            col_to_eco[idx] = eco_name
+            valid_col_indices.append(idx)
+    
+    print(f"Muestras válidas (con ECO_NAME): {len(valid_col_indices)}")
+    
+    # Agrupar índices de columnas por ECO_NAME
+    eco_to_indices = {eco: [] for eco in unique_ecos}
+    for idx, eco in col_to_eco.items():
+        eco_to_indices[eco].append(idx)
+    
+    # Mostrar cuántas muestras tiene cada ECO_NAME
+    for eco in unique_ecos:
+        print(f"  {eco}: {len(eco_to_indices[eco])} muestras")
+    
+    # Procesar archivo por chunks
+    print(f"\nProcesando {otu_file} por bloques...")
+    chunk_size = 1000
+    first_chunk = True
+    
+    # Preparar archivo de salida
+    with open(output_otu, 'w') as out_f:
+        # Escribir header
+        header_out = otu_id_col + ',' + ','.join(unique_ecos) + '\n'
+        out_f.write(header_out)
+        
+        # Procesar chunks
+        chunk_num = 0
+        for chunk in pd.read_csv(otu_file, sep='\t', chunksize=chunk_size, 
+                                  index_col=0, low_memory=False):
+            chunk_num += 1
+            print(f"  Procesando bloque {chunk_num} ({len(chunk)} OTUs)...")
+            
+            # Inicializar diccionario para resultados agrupados
+            grouped_chunk = {eco: [] for eco in unique_ecos}
+            
+            # Para cada fila (OTU)
+            for otu_id, row in chunk.iterrows():
+                # Agrupar por ECO_NAME
+                for eco in unique_ecos:
+                    indices = eco_to_indices[eco]
+                    # Sumar valores de las columnas que pertenecen a este ECO_NAME
+                    total = sum(row.iloc[idx] for idx in indices if idx < len(row))
+                    grouped_chunk[eco].append(total)
+            
+            # Escribir chunk agrupado al archivo
+            for i, otu_id in enumerate(chunk.index):
+                line_values = [str(grouped_chunk[eco][i]) for eco in unique_ecos]
+                line = str(otu_id) + ',' + ','.join(line_values) + '\n'
+                out_f.write(line)
+            
+            # Limpiar memoria
+            del chunk
+            del grouped_chunk
+            gc.collect()
+    
+    print(f"\n✓ OTU table agrupada guardada en {output_otu}")
+    
+    # Crear metadata agrupada
+    print(f"\nCreando metadata agrupada...")
+    meta_grouped = metadata.groupby('ECO_NAME').first().reset_index()
+    
+    # Agregar columna con el conteo de muestras originales por ECO_NAME
+    sample_counts = metadata.groupby('ECO_NAME').size().reset_index(name='n_samples')
+    meta_grouped = meta_grouped.merge(sample_counts, on='ECO_NAME')
+    
+    # Usar ECO_NAME como Plot en la metadata agrupada
+    meta_grouped['Plot'] = meta_grouped['ECO_NAME']
+    
+    # Guardar metadata agrupada
+    print(f"Guardando {output_meta}...")
+    meta_grouped.to_csv(output_meta, sep=',', index=False)
+    
+    print(f"\n✓ Metadata agrupada guardada en {output_meta}")
+    print(f"\n¡Agrupación completada exitosamente!")
+    print(f"  - {len(unique_ecos)} grupos ECO_NAME")
+    print(f"  - Archivos listos para Phyloseq")
+
+if __name__ == "__main__":
+    group_samples("Otu_table_updated.csv", 
+                  "meta_metadata_2.csv",
+                  "Otu_table_grouped.csv",
+                  "meta_metadata_grouped.csv")
+EOF
+
+# Ejecutar el script de Python
+echo "Ejecutando agrupamiento..."
+python3 group_samples.py
+
+# Limpiar script temporal
+rm group_samples.py
+
+echo ""
+echo "Archivos generados:"
+echo "  - $OUTPUT_OTU (OTU table agrupada por ECO_NAME)"
+echo "  - $OUTPUT_META (Metadata agrupada por ECO_NAME)"
+echo ""
+echo "Ahora puedes cargar estos archivos en Phyloseq usando:"
+echo "  otu <- read.csv('$OUTPUT_OTU', row.names=1)"
+echo "  meta <- read.csv('$OUTPUT_META', row.names=1)"
