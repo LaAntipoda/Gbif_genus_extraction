@@ -8,6 +8,7 @@ library(tidyverse)
 
 #URL de gbif
 BASE_URL <- "https://api.gbif.org/v1/occurrence/search"
+BATCH_SIZE <- 300
 
 #Cargar lista de géneros
 generos <- read.delim("archivo.txt", header = FALSE) %>%
@@ -15,6 +16,10 @@ generos <- read.delim("archivo.txt", header = FALSE) %>%
   trimws()
 #verificar que este completa
 cat("Total de géneros:", length(generos), "\n")
+
+has_rows <- function(x) {
+  return(nrow(x) > 0)
+}
 
 # funcion de descarga 
 descargar_genero_api <- function(genero, max_registros = 1000) { #aqui puedes editar la cantidad de registros maxima que quieres
@@ -27,7 +32,7 @@ descargar_genero_api <- function(genero, max_registros = 1000) { #aqui puedes ed
       # Parámetros de la API
       params <- list(
         q = genero,
-        limit = 300,
+        limit = BATCH_SIZE,
         offset = offset
       )
       
@@ -43,7 +48,7 @@ descargar_genero_api <- function(genero, max_registros = 1000) { #aqui puedes ed
       data <- fromJSON(content(response, as = "text"), simplifyDataFrame = TRUE)
       
       # Si no hay resultados, parar
-      if (is.null(data$results) || nrow(data$results) == 0) {
+      if (is.null(data$results) || !has_rows(data$results)) {
         break
       }
       
@@ -62,13 +67,14 @@ descargar_genero_api <- function(genero, max_registros = 1000) { #aqui puedes ed
         ) %>%
         filter(!is.na(decimalLatitude), !is.na(decimalLongitude))
       
-      if (nrow(batch) > 0) {
+      if (has_rows(batch)) {
         todos_registros[[batch_num]] <- batch
-        batch_num <- batch_num + 1
         
         # Contar total actual
         total_actual <- sum(sapply(todos_registros, nrow))
-        cat("  ", genero, "batch", batch_num - 1, "-", nrow(batch), "registros (total:", total_actual, ")\n")
+        cat("  ", genero, "batch", batch_num, "-", nrow(batch), "registros (total:", total_actual, ")\n")
+
+        batch_num <- batch_num + 1
         
         # Si ya tenemos suficientes registros, parar
         if (total_actual >= max_registros) {
@@ -77,11 +83,11 @@ descargar_genero_api <- function(genero, max_registros = 1000) { #aqui puedes ed
       }
       
       # Si obtuvimos menos de 300 registros, hemos llegado al final
-      if (nrow(data$results) < 300) {
+      if (nrow(data$results) < BATCH_SIZE) {
         break
       }
       
-      offset <- offset + 300
+      offset <- offset + BATCH_SIZE
       Sys.sleep(0.2)
     }
     
@@ -123,10 +129,10 @@ if (file.exists(archivo_progreso)) {
 
 # Descargar géneros pendientes
 for (i in seq_along(generos_pendientes)) {
-  g <- generos_pendientes[i]
-  cat("[", i, "/", length(generos_pendientes), "]", g, "\n")
+  genero <- generos_pendientes[i]
+  cat("[", i, "/", length(generos_pendientes), "]", genero, "\n")
   
-  dat <- descargar_genero_api(g, max_registros = 500)
+  dat <- descargar_genero_api(genero, max_registros = 500)
   
   if (!is.null(dat)) {
     resultado <- bind_rows(resultado, dat)
@@ -134,7 +140,7 @@ for (i in seq_along(generos_pendientes)) {
   
   # Guardar progreso después de cada género
   write.csv(resultado, archivo_progreso, row.names = FALSE, na = "")
-  generos_hecho <- c(generos_hecho, g)
+  generos_hecho <- c(generos_hecho, genero)
   writeLines(generos_hecho, archivo_generos_hecho)
   
   Sys.sleep(0.5)
@@ -143,7 +149,7 @@ for (i in seq_along(generos_pendientes)) {
 # Archivo final
 cat("Total de registros:", nrow(resultado), "\n")
 
-if (nrow(resultado) > 0) {
+if (has_rows(resultado)) {
   cat("Géneros únicos:", n_distinct(resultado$genus), "\n")
   cat("Familias únicas:", n_distinct(resultado$family), "\n\n")
   
